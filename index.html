@@ -4,11 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
 <meta name="theme-color" content="#101314" />
-<title>MyBodyMap</title>
-<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
-<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
-<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
-<link rel="manifest" href="/site.webmanifest">
+<title>Дневник тренировок</title>
+<link rel="icon" href="data:,">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js" crossorigin></script>
@@ -161,7 +158,7 @@ const authStyles = {
 };
 
 /* ---- Minimal dependency-free line chart (replaces recharts) ---- */
-function MiniLineChart({ data, yMin, yMax }) {
+function MiniLineChart({ data, yMin, yMax, goal }) {
   const w = 600, h = 220, padL = 34, padR = 12, padT = 14, padB = 26;
   const innerW = w - padL - padR, innerH = h - padT - padB;
   const xFor = (i) => padL + (data.length === 1 ? innerW / 2 : (i / (data.length - 1)) * innerW);
@@ -176,6 +173,12 @@ function MiniLineChart({ data, yMin, yMax }) {
           <text x={4} y={yFor(t) + 3} fontSize="10" fill="#6B7378">{Math.round(t)}</text>
         </g>
       ))}
+      {typeof goal === "number" && (
+        <g>
+          <line x1={padL} x2={w - padR} y1={yFor(goal)} y2={yFor(goal)} stroke="#4C8DFF" strokeWidth="1.5" strokeDasharray="5 4" />
+          <text x={w - padR} y={yFor(goal) - 5} fontSize="10" fill="#4C8DFF" textAnchor="end">Цель: {goal} кг</text>
+        </g>
+      )}
       <polyline points={points} fill="none" stroke="#F2A93B" strokeWidth="2.5" strokeLinejoin="round" strokeLinecap="round" />
       {data.map((d, i) => (
         <circle key={i} cx={xFor(i)} cy={yFor(d.weight)} r="3" fill="#F2A93B" />
@@ -413,6 +416,7 @@ function TrainingTracker() {
   const [trainings, setTrainings] = useState([]);
   const [soreness, setSoreness] = useState([]);
   const [weights, setWeights] = useState([]);
+  const [weightGoal, setWeightGoal] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [saveState, setSaveState] = useState("idle");
 
@@ -434,13 +438,21 @@ function TrainingTracker() {
   useEffect(() => {
     if (!userId) { setLoaded(false); return; }
     (async () => {
-      let t = [], s = [], w = [];
+      let t = [], s = [], w = [], goal = null;
       try { const r = await storageGet(userId, "trainings"); if (r && r.value) t = JSON.parse(r.value); } catch (e) {}
       try { const r = await storageGet(userId, "soreness"); if (r && r.value) s = JSON.parse(r.value); } catch (e) {}
-      try { const r = await storageGet(userId, "weights"); if (r && r.value) w = JSON.parse(r.value); } catch (e) {}
+      try {
+        const r = await storageGet(userId, "weights");
+        if (r && r.value) {
+          const parsed = JSON.parse(r.value);
+          if (Array.isArray(parsed)) { w = parsed; goal = null; }
+          else { w = parsed.entries || []; goal = parsed.goal ?? null; }
+        }
+      } catch (e) {}
       setTrainings(Array.isArray(t) ? t : []);
       setSoreness(Array.isArray(s) ? s : []);
       setWeights(Array.isArray(w) ? w : []);
+      setWeightGoal(goal);
       setLoaded(true);
     })();
   }, [userId]);
@@ -457,7 +469,20 @@ function TrainingTracker() {
   }
   const saveTrainings = (list) => persist("trainings", list, setTrainings);
   const saveSoreness = (list) => persist("soreness", list, setSoreness);
-  const saveWeights = (list) => persist("weights", list, setWeights);
+
+  async function saveWeightsAndGoal(list, goal) {
+    setWeights(list);
+    setWeightGoal(goal);
+    if (!userId) return;
+    setSaveState("saving");
+    try {
+      const res = await storageSet(userId, "weights", JSON.stringify({ entries: list, goal }));
+      setSaveState(res ? "saved" : "error");
+    } catch (e) { setSaveState("error"); }
+    setTimeout(() => setSaveState("idle"), 1200);
+  }
+  const saveWeights = (list) => saveWeightsAndGoal(list, weightGoal);
+  const saveGoal = (goal) => saveWeightsAndGoal(weights, goal);
 
   const trainingsByDate = useMemo(() => {
     const map = {};
@@ -561,7 +586,7 @@ function TrainingTracker() {
               />
             )}
             {tab === "weight" && (
-              <WeightTab weights={weights} onSave={saveWeights} />
+              <WeightTab weights={weights} goal={weightGoal} onSave={saveWeights} onSaveGoal={saveGoal} />
             )}
           </main>
         </div>
@@ -709,7 +734,32 @@ function EmptyHint({ text }) { return <div style={styles.emptyHint}>{text}</div>
 /* Training card                                                           */
 /* ---------------------------------------------------------------------- */
 
+function pluralZones(n) {
+  const mod10 = n % 10, mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "зона";
+  if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) return "зоны";
+  return "зон";
+}
+
+function BodyPreview({ mode, muscles, intensities }) {
+  const [view, setView] = useState("front");
+  return (
+    <div style={styles.bodyPreviewWrap}>
+      <ViewToggle view={view} onChange={setView} />
+      <BodyFigure
+        view={view}
+        muscles={view === "front" ? FRONT_MUSCLES : BACK_MUSCLES}
+        mode={mode}
+        selected={mode === "select" ? muscles : []}
+        intensities={mode === "soreness" ? intensities : {}}
+        onToggle={() => {}}
+      />
+    </div>
+  );
+}
+
 function TrainingCard({ training, onEdit, onDelete }) {
+  const [showBody, setShowBody] = useState(false);
   return (
     <div style={styles.card}>
       <div style={styles.cardTop}>
@@ -735,8 +785,11 @@ function TrainingCard({ training, onEdit, onDelete }) {
         </ul>
       )}
       {training.muscles.length > 0 && (
-        <div style={styles.chipRow}>{training.muscles.map((m) => <span key={m} style={styles.chip}>{muscleLabel(m)}</span>)}</div>
+        <button style={styles.linkSmall} onClick={() => setShowBody((v) => !v)}>
+          {showBody ? "Скрыть схему ▲" : `Мышцы: ${training.muscles.length} ▾`}
+        </button>
       )}
+      {showBody && training.muscles.length > 0 && <BodyPreview mode="select" muscles={training.muscles} />}
       {training.note && <div style={styles.noteText}>{training.note}</div>}
     </div>
   );
@@ -747,6 +800,7 @@ function TrainingCard({ training, onEdit, onDelete }) {
 /* ---------------------------------------------------------------------- */
 
 function RecoveryCard({ entry, onEdit, onDelete }) {
+  const [showBody, setShowBody] = useState(false);
   const activeMuscles = Object.entries(entry.intensities || {}).filter(([, v]) => v > 0);
   return (
     <div style={styles.card}>
@@ -759,14 +813,11 @@ function RecoveryCard({ entry, onEdit, onDelete }) {
       </div>
       {activeMuscles.length === 0 && <div style={styles.emptyHint}>Боль не отмечена.</div>}
       {activeMuscles.length > 0 && (
-        <div style={styles.chipRow}>
-          {activeMuscles.map(([id, lvl]) => (
-            <span key={id} style={{ ...styles.chip, background: SORENESS_LEVELS[lvl].color, color: "#101314" }}>
-              {muscleLabel(id)} · {SORENESS_LEVELS[lvl].label}
-            </span>
-          ))}
-        </div>
+        <button style={styles.linkSmall} onClick={() => setShowBody((v) => !v)}>
+          {showBody ? "Скрыть схему ▲" : `Болит: ${activeMuscles.length} ${pluralZones(activeMuscles.length)} ▾`}
+        </button>
       )}
+      {showBody && activeMuscles.length > 0 && <BodyPreview mode="soreness" intensities={entry.intensities} />}
       {entry.note && <div style={styles.noteText}>{entry.note}</div>}
     </div>
   );
@@ -791,10 +842,12 @@ function RecoveryHistoryTab({ soreness, onEdit, onDelete, onNew }) {
 /* Weight tab                                                              */
 /* ---------------------------------------------------------------------- */
 
-function WeightTab({ weights, onSave }) {
+function WeightTab({ weights, goal, onSave, onSaveGoal }) {
   const [date, setDate] = useState(todayKey());
   const [value, setValue] = useState("");
   const [editingId, setEditingId] = useState(null);
+  const [goalInput, setGoalInput] = useState(goal != null ? String(goal) : "");
+  const [editingGoal, setEditingGoal] = useState(false);
 
   const sorted = useMemo(() => [...weights].sort((a, b) => (a.date < b.date ? -1 : 1)), [weights]);
   const chartData = sorted.map((w) => ({ dateLabel: shortDate(w.date), date: w.date, weight: w.weight }));
@@ -824,9 +877,22 @@ function WeightTab({ weights, onSave }) {
   function handleEdit(w) { setEditingId(w.id); setDate(w.date); setValue(String(w.weight)); }
   function handleDelete(id) { onSave(weights.filter((w) => w.id !== id)); if (editingId === id) resetForm(); }
 
+  function handleSaveGoal() {
+    const num = parseFloat(goalInput.replace(",", "."));
+    onSaveGoal(num > 0 ? num : null);
+    setEditingGoal(false);
+  }
+  function handleClearGoal() {
+    setGoalInput("");
+    onSaveGoal(null);
+    setEditingGoal(false);
+  }
+
   const yValues = chartData.map((d) => d.weight);
+  if (typeof goal === "number") yValues.push(goal);
   const yMin = yValues.length ? Math.floor(Math.min(...yValues) - 1) : 0;
   const yMax = yValues.length ? Math.ceil(Math.max(...yValues) + 1) : 100;
+  const showChart = chartData.length >= 2 || typeof goal === "number";
 
   return (
     <div className="weight-columns">
@@ -845,16 +911,37 @@ function WeightTab({ weights, onSave }) {
             </div>
           </div>
           <div style={styles.statCard}>
-            <div style={styles.statLabel}>Записей</div>
-            <div style={styles.statValue}>{weights.length}</div>
+            <div style={styles.statLabel}>Цель</div>
+            <div style={styles.statValue}>{goal != null ? `${goal} кг` : "—"}</div>
           </div>
         </div>
 
+        {!editingGoal ? (
+          <button style={styles.linkSmall} onClick={() => { setGoalInput(goal != null ? String(goal) : ""); setEditingGoal(true); }}>
+            {goal != null ? "Изменить цель" : "Поставить цель по весу"}
+          </button>
+        ) : (
+          <div style={{ ...styles.exBuilder, marginTop: 6 }}>
+            <FieldRow>
+              <Field label="Целевой вес (кг)">
+                <input type="number" min="0" step="0.1" placeholder="напр. 75" value={goalInput} onChange={(e) => setGoalInput(e.target.value)} style={styles.input} />
+              </Field>
+            </FieldRow>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button style={styles.primaryBtnSmall} onClick={handleSaveGoal}><Check size={15} /> Сохранить цель</button>
+              {goal != null && <button style={styles.secondaryBtnSmall} onClick={handleClearGoal}>Убрать цель</button>}
+              <button style={styles.secondaryBtnSmall} onClick={() => setEditingGoal(false)}>Отмена</button>
+            </div>
+          </div>
+        )}
+
+        <div style={{ height: 12 }} />
+
         <div style={styles.chartWrap}>
-          {chartData.length >= 2 ? (
-            <MiniLineChart data={chartData} yMin={yMin} yMax={yMax} />
+          {showChart ? (
+            <MiniLineChart data={chartData} yMin={yMin} yMax={yMax} goal={goal} />
           ) : (
-            <EmptyHint text="Добавьте хотя бы два замера, чтобы увидеть график изменения веса." />
+            <EmptyHint text="Добавьте хотя бы два замера (или поставьте цель), чтобы увидеть график." />
           )}
         </div>
 
@@ -1043,9 +1130,9 @@ function ViewToggle({ view, onChange }) {
   );
 }
 function Field({ label, children }) {
-  return <div style={{ flex: 1, minWidth: 90 }}><div style={styles.fieldLabel}>{label}</div>{children}</div>;
+  return <div style={{ flex: "1 1 128px", minWidth: 0 }}><div style={styles.fieldLabel}>{label}</div>{children}</div>;
 }
-function FieldRow({ children }) { return <div style={styles.fieldRow}>{children}</div>; }
+function FieldRow({ children }) { return <div className="field-row" style={styles.fieldRow}>{children}</div>; }
 
 function ModalShell({ title, onCancel, children }) {
   return (
@@ -1085,7 +1172,13 @@ const CSS = `
 .weight-columns{ display:block; }
 .day-panel{ margin-top:18px; border-top:1px solid #23282B; padding-top:14px; }
 .modal-overlay{ position:fixed; inset:0; background:rgba(8,9,10,0.72); display:flex; align-items:flex-end; justify-content:center; z-index:50; }
-.modal-sheet{ background:#141718; width:100%; max-width:480px; max-height:88vh; overflow-y:auto; border-radius:18px 18px 0 0; border:1px solid #23282B; border-bottom:none; box-sizing:border-box; }
+.modal-sheet{ background:#141718; width:100%; max-width:480px; max-height:88vh; overflow-y:auto; overflow-x:hidden; border-radius:18px 18px 0 0; border:1px solid #23282B; border-bottom:none; box-sizing:border-box; }
+.field-row{ min-width:0; }
+.field-row > div{ min-width:0; }
+
+@media (max-width: 360px){
+  .field-row{ flex-direction:column; }
+}
 
 @media (min-width: 860px){
   .app-inner{ max-width:1100px; padding-bottom:32px; }
@@ -1139,6 +1232,8 @@ const styles = {
   chip: { background: "#262B2E", border: "1px solid #333B40", borderRadius: 999, padding: "3px 10px", fontSize: 11.5 },
   noteText: { marginTop: 8, fontSize: 13, color: "#B7BCC0", lineHeight: 1.5, fontStyle: "italic" },
   addLink: { display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", color: "#F2A93B", fontSize: 13, fontWeight: 600, cursor: "pointer", padding: "6px 0" },
+  linkSmall: { display: "inline-flex", alignItems: "center", gap: 4, background: "transparent", border: "none", color: "#F2A93B", fontSize: 12, fontWeight: 600, cursor: "pointer", padding: "4px 0", marginTop: 4 },
+  bodyPreviewWrap: { background: "#141718", border: "1px solid #23282B", borderRadius: 10, padding: "10px 8px", marginTop: 6 },
 
   tabButton: { flex: 1, background: "transparent", border: "none", padding: "10px 0 12px", display: "flex", flexDirection: "column", alignItems: "center", cursor: "pointer" },
 
@@ -1149,15 +1244,15 @@ const styles = {
 
   fieldRow: { display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" },
   fieldLabel: { fontSize: 11, color: "#8A9296", marginBottom: 4 },
-  input: { width: "100%", background: "#1A1E20", border: "1px solid #2B3237", borderRadius: 8, color: "#EDEFEF", padding: "8px 10px", fontSize: 13.5, boxSizing: "border-box" },
-  textarea: { width: "100%", minHeight: 70, background: "#1A1E20", border: "1px solid #2B3237", borderRadius: 8, color: "#EDEFEF", padding: "8px 10px", fontSize: 13.5, boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" },
+  input: { width: "100%", minWidth: 0, background: "#1A1E20", border: "1px solid #2B3237", borderRadius: 8, color: "#EDEFEF", padding: "8px 10px", fontSize: 13.5, boxSizing: "border-box" },
+  textarea: { width: "100%", minWidth: 0, minHeight: 70, background: "#1A1E20", border: "1px solid #2B3237", borderRadius: 8, color: "#EDEFEF", padding: "8px 10px", fontSize: 13.5, boxSizing: "border-box", resize: "vertical", fontFamily: "inherit" },
 
   quickRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
   quickChip: { background: "#1A1E20", border: "1px solid #2B3237", borderRadius: 999, padding: "5px 12px", fontSize: 12, color: "#B7BCC0", cursor: "pointer" },
 
   exBuilder: { background: "#17191B", border: "1px solid #23282B", borderRadius: 10, padding: 12, marginBottom: 6 },
-  typeToggle: { display: "flex", gap: 6, marginBottom: 10 },
-  typeToggleBtn: { flex: 1, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "#1A1E20", border: "1px solid #2B3237", borderRadius: 8, padding: "7px 10px", fontSize: 12.5, color: "#B7BCC0", cursor: "pointer" },
+  typeToggle: { display: "flex", gap: 6, marginBottom: 10, flexWrap: "wrap" },
+  typeToggleBtn: { flex: "1 1 120px", minWidth: 0, display: "flex", alignItems: "center", justifyContent: "center", gap: 6, background: "#1A1E20", border: "1px solid #2B3237", borderRadius: 8, padding: "7px 10px", fontSize: 12.5, color: "#B7BCC0", cursor: "pointer" },
   typeToggleBtnActive: { background: "#F2A93B", color: "#141718", border: "1px solid #F2A93B", fontWeight: 600 },
 
   legendRow: { display: "flex", gap: 12, justifyContent: "center", marginTop: 8, flexWrap: "wrap" },
